@@ -1,0 +1,569 @@
+import {
+    type ChangeEventHandler,
+    type FormEventHandler,
+    type MouseEventHandler,
+    useContext,
+    useEffect,
+    useState,
+    type FC,
+} from 'react';
+import { Alert, Button, Divider, Link, styled } from '@mui/material';
+import produce from 'immer';
+import { trim } from 'component/common/util';
+import type { AddonSchema, AddonTypeSchema } from 'openapi';
+import { IntegrationParameters } from './IntegrationParameters/IntegrationParameters.tsx';
+import {
+    kvpsToEditableForm,
+    kvpsToStorageForm,
+    getKvpsForParam,
+    isKvpParam,
+    validateKeys,
+} from './IntegrationParameters/IntegrationParameter/KvpParameterUtils.ts';
+import { IntegrationInstall } from './IntegrationInstall/IntegrationInstall.tsx';
+import { IntegrationServerInstall } from './IntegrationServerInstall/IntegrationServerInstall.tsx';
+import cloneDeep from 'lodash.clonedeep';
+import { useNavigate } from 'react-router';
+import useAddonsApi from 'hooks/api/actions/useAddonsApi/useAddonsApi';
+import useToast from 'hooks/useToast';
+import { formatUnknownError } from 'utils/formatUnknownError';
+import useProjects from 'hooks/api/getters/useProjects/useProjects';
+import { useEnvironments } from 'hooks/api/getters/useEnvironments/useEnvironments';
+import { IntegrationMultiSelector } from './IntegrationMultiSelector/IntegrationMultiSelector.tsx';
+import FormTemplate from 'component/common/FormTemplate/FormTemplate';
+import useUiConfig from 'hooks/api/getters/useUiConfig/useUiConfig';
+import PermissionButton from 'component/common/PermissionButton/PermissionButton';
+import {
+    CREATE_ADDON,
+    UPDATE_ADDON,
+} from '../../providers/AccessProvider/permissions.ts';
+import { UPDATE_PROJECT_ADDON } from '@server/types/permissions.ts';
+import { useOptionalPathParam } from 'hooks/useOptionalPathParam';
+import {
+    formatIntegrationApiPath,
+    formatIntegrationListPath,
+} from '../integrationPaths.ts';
+import {
+    StyledForm,
+    StyledAlerts,
+    StyledInput,
+    StyledContainer,
+    StyledButtonContainer,
+    StyledButtonSection,
+    StyledRaisedSection,
+} from './IntegrationForm.styles';
+import { GO_BACK } from 'constants/navigate';
+import { ConditionallyRender } from 'component/common/ConditionallyRender/ConditionallyRender';
+import { IntegrationDelete } from './IntegrationDelete/IntegrationDelete.tsx';
+import { IntegrationStateSwitch } from './IntegrationStateSwitch/IntegrationStateSwitch.tsx';
+import { capitalizeFirst } from 'utils/capitalizeFirst';
+import { IntegrationHowToSection } from '../IntegrationHowToSection/IntegrationHowToSection.tsx';
+import { IntegrationEventsModal } from '../IntegrationEvents/IntegrationEventsModal.tsx';
+import AccessContext from 'contexts/AccessContext';
+import { FormGroup } from 'component/common/FormGroup/FormGroup.tsx';
+
+const StyledHeader = styled('div')(({ theme }) => ({
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
+    marginBottom: theme.spacing(2.5),
+}));
+
+const StyledHeaderTitle = styled('h1')(({ theme }) => ({
+    ...theme.typography.h1,
+}));
+
+type IntegrationFormProps = {
+    provider?: AddonTypeSchema;
+    fetch: () => void;
+    editMode: boolean;
+    addon: AddonSchema | Omit<AddonSchema, 'id'>;
+    deprecated?: boolean;
+    modal?: boolean;
+};
+
+const eventsFor = (
+    provider: AddonTypeSchema | undefined,
+    stored: string[],
+): string[] => (provider?.fixedEvents ? (provider.events ?? []) : stored);
+
+const environmentsFor = (
+    provider: AddonTypeSchema | undefined,
+    stored?: string[],
+): string[] | undefined => (provider?.environmentIndependent ? [] : stored);
+
+const toFormValues =
+    (provider?: AddonTypeSchema) =>
+    <T extends Pick<AddonSchema, 'parameters' | 'events' | 'environments'>>(
+        values: T,
+    ): T => ({
+        ...values,
+        events: eventsFor(provider, values.events),
+        environments: environmentsFor(provider, values.environments),
+        parameters: kvpsToEditableForm(provider?.parameters)(values.parameters),
+    });
+
+const toApiValues =
+    (providerParams: AddonTypeSchema['parameters']) =>
+    <T extends Pick<AddonSchema, 'parameters'>>(values: T): T => ({
+        ...values,
+        parameters: kvpsToStorageForm(providerParams)(values.parameters),
+    });
+
+export const IntegrationForm: FC<IntegrationFormProps> = ({
+    editMode,
+    provider,
+    addon: initialValues,
+    fetch,
+    deprecated,
+    modal,
+}) => {
+    const projectId = useOptionalPathParam('projectId');
+    const { createAddon, updateAddon } = useAddonsApi();
+    const { setToastData, setToastApiError } = useToast();
+    const navigate = useNavigate();
+    const { projects: availableProjects } = useProjects();
+    const selectableProjects = availableProjects.map((project) => ({
+        value: project.id,
+        label: project.name,
+    }));
+    const { environments: availableEnvironments } = useEnvironments();
+    const selectableEnvironments = availableEnvironments.map((environment) => ({
+        value: environment.name,
+        label: environment.name,
+    }));
+    const selectableEvents = provider?.events
+        ?.map((event) => ({
+            value: event,
+            label: event,
+        }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+    const { uiConfig } = useUiConfig();
+    const [formValues, setFormValues] = useState(() =>
+        toFormValues(provider)(initialValues),
+    );
+    const fixedEvents = Boolean(provider?.fixedEvents);
+    const environmentIndependent = Boolean(provider?.environmentIndependent);
+    const [errors, setErrors] = useState<{
+        containsErrors: boolean;
+        parameters: Record<string, string>;
+        events?: string;
+        projects?: string;
+        environments?: string;
+        general?: string;
+        description?: string;
+    }>({
+        containsErrors: false,
+        parameters: {},
+    });
+    const [eventsModalOpen, setEventsModalOpen] = useState(false);
+    const { isAdmin } = useContext(AccessContext);
+
+    const selectedProjects = projectId
+        ? [projectId]
+        : (formValues.projects ?? []);
+
+    const submitText = editMode ? 'Update' : 'Create';
+    const url = `${uiConfig.unleashUrl}/${formatIntegrationApiPath(projectId)}${
+        editMode ? `/${(formValues as AddonSchema).id}` : ``
+    }`;
+
+    const formatApiCode = () => {
+        return `curl --location --request ${editMode ? 'PUT' : 'POST'} '${url}' \\
+        --header 'Authorization: INSERT_API_KEY' \\
+        --header 'Content-Type: application/json' \\
+        --data-raw '${JSON.stringify(toApiValues(provider?.parameters)(formValues), undefined, 2)}'`;
+    };
+
+    useEffect(() => {
+        if (!provider) {
+            fetch();
+        }
+    }, [fetch, provider]);
+
+    // biome-ignore lint/correctness/useExhaustiveDependencies: addon is a new object every render; reset only when a different addon loads
+    useEffect(() => {
+        setFormValues(toFormValues(provider)(initialValues));
+    }, [initialValues.description, initialValues.provider]);
+
+    useEffect(() => {
+        if (provider && !formValues.provider) {
+            setFormValues(
+                toFormValues(provider)({
+                    ...initialValues,
+                    provider: provider.name,
+                }),
+            );
+        }
+    }, [provider, initialValues, formValues.provider]);
+
+    const setFieldValue =
+        (field: string): ChangeEventHandler<HTMLInputElement> =>
+        (event) => {
+            event.preventDefault();
+            setFormValues({ ...formValues, [field]: event.target.value });
+        };
+
+    const onEnabled: MouseEventHandler = (event) => {
+        event.preventDefault();
+        setFormValues(({ enabled }) => ({ ...formValues, enabled: !enabled }));
+    };
+
+    const setParameterValue =
+        (param: string): ChangeEventHandler<HTMLInputElement> =>
+        (event) => {
+            event.preventDefault();
+            const value =
+                trim(event.target.value) === ''
+                    ? undefined
+                    : event.target.value;
+            setFormValues(
+                produce((draft) => {
+                    if (value === undefined) {
+                        delete draft.parameters[param];
+                    } else {
+                        draft.parameters[param] = value;
+                    }
+                }),
+            );
+        };
+
+    const setStructuredParameter = (param: string) => (value: unknown) => {
+        setFormValues(
+            produce((draft) => {
+                if (value === undefined) {
+                    delete draft.parameters[param];
+                } else {
+                    draft.parameters[param] = value;
+                }
+            }),
+        );
+    };
+
+    const setEventValues = (events: string[]) => {
+        setFormValues(
+            produce((draft) => {
+                draft.events = events;
+            }),
+        );
+        setErrors((prev) => ({
+            ...prev,
+            events: undefined,
+        }));
+    };
+    const setProjects = (projects: string[]) => {
+        setFormValues(
+            produce((draft) => {
+                draft.projects = projects;
+            }),
+        );
+        setErrors((prev) => ({
+            ...prev,
+            projects: undefined,
+        }));
+    };
+    const setEnvironments = (environments: string[]) => {
+        setFormValues(
+            produce((draft) => {
+                draft.environments = environments;
+            }),
+        );
+        setErrors((prev) => ({
+            ...prev,
+            environments: undefined,
+        }));
+    };
+
+    const onCancel = () => {
+        navigate(GO_BACK);
+    };
+
+    const onSubmit: FormEventHandler<HTMLFormElement> = async (event) => {
+        event.preventDefault();
+        if (!provider || deprecated) {
+            return;
+        }
+
+        const updatedErrors = cloneDeep(errors);
+        updatedErrors.parameters = {};
+        updatedErrors.containsErrors = false;
+
+        // Validations
+        if (formValues.events.length === 0) {
+            updatedErrors.events = 'You must listen to at least one event';
+            updatedErrors.containsErrors = true;
+        }
+
+        provider.parameters?.forEach((parameterConfig) => {
+            const setError = (message: string) => {
+                updatedErrors.parameters[parameterConfig.name] = message;
+                updatedErrors.containsErrors = true;
+            };
+
+            if (isKvpParam(parameterConfig)) {
+                const kvps = getKvpsForParam(
+                    formValues.parameters,
+                    parameterConfig.name,
+                );
+                if (validateKeys(kvps).some(Boolean)) {
+                    setError('Some key-value pairs are invalid.');
+                }
+                return;
+            }
+
+            let value = formValues.parameters[parameterConfig.name];
+            value = typeof value === 'string' ? trim(value) : value;
+            if (parameterConfig.required && !value) {
+                setError('This field is required');
+            }
+        });
+
+        if (updatedErrors.containsErrors) {
+            setErrors(updatedErrors);
+            return;
+        }
+
+        try {
+            if (editMode) {
+                await updateAddon(
+                    toApiValues(provider?.parameters)(
+                        formValues,
+                    ) as AddonSchema,
+                );
+            } else {
+                await createAddon(
+                    toApiValues(provider?.parameters)(formValues) as Omit<
+                        AddonSchema,
+                        'id'
+                    >,
+                );
+            }
+
+            fetch();
+
+            navigate(formatIntegrationListPath(projectId));
+            setToastData({
+                type: 'success',
+                text: editMode ? 'Integration updated' : 'Integration created',
+            });
+        } catch (error) {
+            const message = formatUnknownError(error);
+            setToastApiError(message);
+            setErrors({
+                parameters: {},
+                general: message,
+                containsErrors: true,
+            });
+        }
+    };
+
+    const {
+        name,
+        displayName,
+        description,
+        documentationUrl = 'https://docs.getunleash.io/integrate',
+        installation,
+        serverInstallation,
+        alerts,
+    } = provider ? provider : ({} as Partial<AddonTypeSchema>);
+
+    return (
+        <FormTemplate
+            modal={modal}
+            description={description || ''}
+            documentationLink={documentationUrl}
+            documentationLinkLabel={`${
+                displayName || capitalizeFirst(`${name} `)
+            } documentation`}
+            formatApiCode={formatApiCode}
+            footer={
+                <StyledButtonContainer>
+                    <StyledButtonSection>
+                        <PermissionButton
+                            type='submit'
+                            color='primary'
+                            variant='contained'
+                            permission={
+                                editMode
+                                    ? [UPDATE_ADDON, UPDATE_PROJECT_ADDON]
+                                    : [CREATE_ADDON, UPDATE_PROJECT_ADDON]
+                            }
+                            projectId={projectId}
+                            onClick={onSubmit}
+                            disabled={deprecated}
+                        >
+                            {submitText}
+                        </PermissionButton>
+                        <Button type='button' onClick={onCancel}>
+                            Cancel
+                        </Button>
+                    </StyledButtonSection>
+                </StyledButtonContainer>
+            }
+        >
+            <StyledHeader>
+                <StyledHeaderTitle>
+                    {submitText}{' '}
+                    {displayName || (name ? capitalizeFirst(name) : '')}{' '}
+                    integration
+                </StyledHeaderTitle>
+                <ConditionallyRender
+                    condition={editMode && isAdmin}
+                    show={
+                        <Link onClick={() => setEventsModalOpen(true)}>
+                            View events
+                        </Link>
+                    }
+                />
+            </StyledHeader>
+            <StyledForm onSubmit={onSubmit}>
+                <StyledContainer>
+                    <ConditionallyRender
+                        condition={Boolean(alerts)}
+                        show={() => (
+                            <StyledAlerts>
+                                {alerts?.map(({ type, text, link }) => (
+                                    <Alert severity={type} key={text}>
+                                        {text}{' '}
+                                        {link && (
+                                            <Link
+                                                href={link.url}
+                                                target='_blank'
+                                                rel='noreferrer'
+                                            >
+                                                {link.title}
+                                            </Link>
+                                        )}
+                                    </Alert>
+                                ))}
+                            </StyledAlerts>
+                        )}
+                    />
+                    <IntegrationHowToSection provider={provider} />
+                    <StyledRaisedSection>
+                        <IntegrationStateSwitch
+                            checked={formValues.enabled}
+                            onClick={onEnabled}
+                        />
+                    </StyledRaisedSection>
+                    <StyledRaisedSection>
+                        <ConditionallyRender
+                            condition={Boolean(installation)}
+                            show={() => (
+                                <IntegrationInstall
+                                    url={installation!.url}
+                                    title={installation!.title}
+                                    helpText={installation!.helpText}
+                                />
+                            )}
+                        />
+                        {serverInstallation ? (
+                            <IntegrationServerInstall
+                                path={serverInstallation.path}
+                                title={serverInstallation.title}
+                                helpText={serverInstallation.helpText}
+                                parameters={formValues.parameters}
+                                definitions={provider?.parameters}
+                                projectId={projectId}
+                            />
+                        ) : null}
+                        <IntegrationParameters
+                            provider={provider}
+                            config={formValues as AddonSchema}
+                            parametersErrors={errors.parameters}
+                            editMode={editMode}
+                            setParameterValue={setParameterValue}
+                            setStructuredParameter={setStructuredParameter}
+                            projects={selectedProjects}
+                        />
+                    </StyledRaisedSection>
+                    <FormGroup title='Configuration'>
+                        <div>
+                            <StyledInput
+                                size='large'
+                                minRows={1}
+                                multiline
+                                label='Description'
+                                name='description'
+                                placeholder=''
+                                value={formValues.description ?? ''}
+                                error={Boolean(errors.description)}
+                                errorText={errors.description}
+                                onChange={setFieldValue('description')}
+                            />
+                        </div>
+
+                        <ConditionallyRender
+                            condition={!fixedEvents}
+                            show={
+                                <div>
+                                    <IntegrationMultiSelector
+                                        options={selectableEvents || []}
+                                        selectedItems={formValues.events}
+                                        onChange={setEventValues}
+                                        entityName='event'
+                                        error={errors.events}
+                                        description='Select which events you want your integration to be notified about.'
+                                        required
+                                    />
+                                </div>
+                            }
+                        />
+                        <ConditionallyRender
+                            condition={!projectId}
+                            show={
+                                <div>
+                                    <IntegrationMultiSelector
+                                        options={selectableProjects}
+                                        selectedItems={
+                                            formValues.projects || []
+                                        }
+                                        onChange={setProjects}
+                                        entityName='project'
+                                        description='Selecting project(s) will filter events, so that your integration only receives events related to those specific projects.'
+                                        note='If no projects are selected, the integration will receive events from all projects.'
+                                    />
+                                </div>
+                            }
+                        />
+                        <ConditionallyRender
+                            condition={!environmentIndependent}
+                            show={
+                                <div>
+                                    <IntegrationMultiSelector
+                                        options={selectableEnvironments}
+                                        selectedItems={
+                                            formValues.environments || []
+                                        }
+                                        onChange={setEnvironments}
+                                        entityName='environment'
+                                        description='Selecting environment(s) will filter events, so that your integration only receives events related to those specific environments. Global events that are not specific to an environment will still be received.'
+                                        note='If no environments are selected, the integration will receive events from all environments.'
+                                    />
+                                </div>
+                            }
+                        />
+                    </FormGroup>
+                    <ConditionallyRender
+                        condition={editMode}
+                        show={
+                            <>
+                                <Divider />
+                                <section>
+                                    <IntegrationDelete
+                                        id={(formValues as AddonSchema).id}
+                                    />
+                                </section>
+                            </>
+                        }
+                    />
+                </StyledContainer>
+            </StyledForm>
+            <IntegrationEventsModal
+                addon={initialValues as AddonSchema}
+                open={eventsModalOpen}
+                setOpen={setEventsModalOpen}
+            />
+        </FormTemplate>
+    );
+};

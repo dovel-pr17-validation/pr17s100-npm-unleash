@@ -1,0 +1,66 @@
+import { useRef, useState, type FC } from 'react';
+import copy from 'copy-to-clipboard';
+import useToast from 'hooks/useToast';
+import { useKeyboardCopy } from 'hooks/useKeyboardCopy';
+import { useTracking } from 'hooks/useTracking';
+import { copyFlagNameTracking } from 'component/feature/flagActionsTracking';
+import { IconButton, Tooltip } from '@mui/material';
+import Check from '@mui/icons-material/Check';
+import FileCopyOutlined from '@mui/icons-material/FileCopyOutlined';
+
+export const FeatureCopyName: FC<{ name: string }> = ({ name }) => {
+    const buttonRef = useRef<HTMLButtonElement>(null);
+    const [isFeatureNameCopied, setIsFeatureNameCopied] = useState(false);
+    const { setToastData } = useToast();
+    const trackCopyFlagName = useTracking(copyFlagNameTracking);
+
+    const handleCopyToClipboard = (method: 'button' | 'keyboard-shortcut') => {
+        try {
+            if (copy(name)) {
+                trackCopyFlagName('succeeded', { method });
+            } else {
+                trackCopyFlagName('failed', {
+                    method,
+                    failedOn: 'clipboard',
+                });
+            }
+            setIsFeatureNameCopied(true);
+            const timeout = setTimeout(() => {
+                setIsFeatureNameCopied(false);
+            }, 3000);
+
+            return () => {
+                clearTimeout(timeout);
+            };
+        } catch (_error: unknown) {
+            setToastData({
+                type: 'error',
+                text: 'Could not copy feature name',
+            });
+        }
+    };
+
+    const shortcutDescription = useKeyboardCopy(
+        () => handleCopyToClipboard('keyboard-shortcut'),
+        [buttonRef],
+    );
+
+    return (
+        <Tooltip
+            title={
+                isFeatureNameCopied
+                    ? 'Copied!'
+                    : `Copy name (${shortcutDescription})`
+            }
+            arrow
+        >
+            <IconButton
+                ref={buttonRef}
+                size='medium'
+                onClick={() => handleCopyToClipboard('button')}
+            >
+                {isFeatureNameCopied ? <Check /> : <FileCopyOutlined />}
+            </IconButton>
+        </Tooltip>
+    );
+};

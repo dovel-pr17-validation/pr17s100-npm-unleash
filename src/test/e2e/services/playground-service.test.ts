@@ -1,0 +1,681 @@
+import type {
+    PlaygroundFeatureEvaluationResult,
+    PlaygroundService,
+} from '../../../lib/features/playground/playground-service.js';
+import { clientFeaturesAndSegments } from '../../arbitraries.js';
+import { generate as generateContext } from '../../../lib/openapi/spec/sdk-context-schema.arbitraries.js';
+import fc from 'fast-check';
+import { createTestConfig } from '../../config/test-config.js';
+import dbInit, { type ITestDb } from '../helpers/database-init.js';
+import type { IUnleashStores } from '../../../lib/types/stores.js';
+import { seedDatabaseForPlaygroundTest } from '../helpers/seed-playground.js';
+import type { PlaygroundFeatureSchema } from '../../../lib/openapi/spec/playground-feature-schema.js';
+import type { ClientFeatureSchema } from '../../../lib/openapi/spec/client-feature-schema.js';
+import type { SdkContextSchema } from '../../../lib/openapi/spec/sdk-context-schema.js';
+import type { SegmentSchema } from '../../../lib/openapi/spec/segment-schema.js';
+import { playgroundStrategyEvaluation } from '../../../lib/openapi/spec/playground-strategy-schema.js';
+import type { PlaygroundSegmentSchema } from '../../../lib/openapi/spec/playground-segment-schema.js';
+import { createPlaygroundService } from '../../../lib/features/index.js';
+import { DEFAULT_ENV } from '../../../lib/server-impl.js';
+import { SYSTEM_USER_ID } from '../../../lib/types/core.js';
+
+let stores: IUnleashStores;
+let db: ITestDb;
+let service: PlaygroundService;
+
+beforeAll(async () => {
+    const config = createTestConfig();
+    db = await dbInit('playground_service_serial', config.getLogger);
+    stores = db.stores;
+    service = createPlaygroundService(db.rawDatabase, config);
+});
+
+afterAll(async () => {
+    await db.destroy();
+});
+
+const cleanup = async () => {
+    await stores.segmentStore.deleteAll();
+    await stores.featureToggleStore.deleteAll();
+    await stores.eventStore.deleteAll();
+    await stores.featureStrategiesStore.deleteAll();
+    await stores.segmentStore.deleteAll();
+};
+
+afterEach(cleanup);
+
+const testParams = {
+    interruptAfterTimeLimit: 4000, // Default timeout in Jest 5000ms
+    markInterruptAsFailure: false, // When set to false, timeout during initial cases will not be considered as a failure
+};
+
+describe('the playground service (e2e)', () => {
+    const insertAndEvaluateFeatures = async ({
+        features,
+        context,
+        env = DEFAULT_ENV,
+        segments,
+    }: {
+        features: ClientFeatureSchema[];
+        context: SdkContextSchema;
+        env?: string;
+        segments?: SegmentSchema[];
+    }): Promise<PlaygroundFeatureEvaluationResult[]> => {
+        await seedDatabaseForPlaygroundTest(db, features, env, segments);
+        const projects = '*';
+
+        const serviceFeatures = await service.evaluateQuery(
+            projects,
+            env,
+            context,
+            SYSTEM_USER_ID,
+        );
+
+        return serviceFeatures;
+    };
+
+    test("should return all of a feature's strategies", async () => {
+        await fc.assert(
+            fc
+                .asyncProperty(
+                    clientFeaturesAndSegments({ minLength: 1 }),
+                    generateContext(),
+                    fc.context(),
+                    async (data, context, ctx) => {
+                        const log = (x: unknown) => ctx.log(JSON.stringify(x));
+                        const serviceFeatures = await insertAndEvaluateFeatures(
+                            {
+                                ...data,
+                                context,
+                            },
+                        );
+
+                        const serviceFeaturesDict: {
+                            [key: string]: PlaygroundFeatureSchema;
+                        } = serviceFeatures.reduce(
+                            (acc, feature) => ({
+                                ...acc,
+                                [feature.name]: feature,
+                            }),
+                            {},
+                        );
+
+                        // for each feature, find the corresponding evaluated feature
+                        // and make sure that the evaluated
+                        // return genFeat.length === servFeat.length && zip(gen, serv).
+                        data.features.forEach((feature) => {
+                            const mappedFeature: PlaygroundFeatureSchema =
+                                serviceFeaturesDict[feature.name];
+
+                            // log(feature);
+                            log(mappedFeature);
+
+                            const featureStrategies = feature.strategies ?? [];
+
+                            expect(
+                                mappedFeature.strategies.data.length,
+                            ).toEqual(featureStrategies.length);
+
+                            // we can't guarantee that the order we inserted
+                            // strategies into the database is the same as it
+                            // was returned by the service , so we'll need to
+                            // scan through the list of strats.
+
+                            // extract the `result` property, because it
+                            // doesn't exist in the input
+
+                            const removeResult = <T>({
+                                result,
+                                ...rest
+                            }: T & {
+                                result: unknown;
+                            }) => rest;
+
+                            const cleanedReceivedStrategies =
+                                mappedFeature.strategies.data.map(
+                                    (strategy) => {
+                                        const {
+                                            segments: mappedSegments,
+                                            ...mappedStrategy
+                                        } = removeResult(strategy);
+
+                                        return {
+                                            ...mappedStrategy,
+                                            constraints:
+                                                mappedStrategy.constraints?.map(
+                                                    removeResult,
+                                                ),
+                                        };
+                                    },
+                                );
+
+                            feature.strategies?.forEach(
+                                ({ segments, ...strategy }) => {
+                                    expect(cleanedReceivedStrategies).toEqual(
+                                        expect.arrayContaining([
+                                            {
+                                                ...strategy,
+                                                title: undefined,
+                                                disabled: false,
+                                                constraints:
+                                                    strategy.constraints ?? [],
+                                                parameters:
+                                                    strategy.parameters ?? {},
+                                            },
+                                        ]),
+                                    );
+                                },
+                            );
+                        });
+                    },
+                )
+                .afterEach(cleanup),
+            testParams,
+        );
+    });
+
+    test('should return feature strategies with all their segments', async () => {
+        await fc.assert(
+            fc
+                .asyncProperty(
+                    clientFeaturesAndSegments({ minLength: 1 }),
+                    generateContext(),
+                    async (
+                        { segments, features: generatedFeatures },
+                        context,
+                    ) => {
+                        const serviceFeatures = await insertAndEvaluateFeatures(
+                            {
+                                features: generatedFeatures,
+                                context,
+                                segments,
+                            },
+                        );
+
+                        const serviceFeaturesDict: {
+                            [key: string]: PlaygroundFeatureSchema;
+                        } = serviceFeatures.reduce(
+                            (acc, feature) => ({
+                                ...acc,
+                                [feature.name]: feature,
+                            }),
+                            {},
+                        );
+
+                        // ensure that segments are mapped on to features
+                        // correctly. We do not need to check whether the
+                        // evaluation is correct; that is taken care of by other
+                        // tests.
+
+                        // For each feature strategy, find its list of segments and
+                        // compare it to the input.
+                        //
+                        // We can assert three things:
+                        //
+                        // 1. The segments lists have the same length
+                        //
+                        // 2. All segment ids listed in an input id list are
+                        // also in the original segments list
+                        //
+                        // 3. If a feature is considered enabled, _all_ segments
+                        // must be true. If a feature is _disabled_, _at least_
+                        // one segment is not true.
+                        generatedFeatures.forEach((unmappedFeature) => {
+                            const strategies = serviceFeaturesDict[
+                                unmappedFeature.name
+                            ].strategies.data.reduce(
+                                (acc, strategy) => ({
+                                    ...acc,
+                                    [strategy.id]: strategy,
+                                }),
+                                {},
+                            );
+
+                            unmappedFeature.strategies?.forEach(
+                                (unmappedStrategy) => {
+                                    const mappedStrategySegments: PlaygroundSegmentSchema[] =
+                                        strategies[unmappedStrategy.id!]
+                                            .segments;
+
+                                    const unmappedSegments =
+                                        unmappedStrategy.segments ?? [];
+
+                                    // 1. The segments lists have the same length
+                                    // 2. All segment ids listed in the input exist:
+                                    expect(
+                                        [
+                                            ...mappedStrategySegments?.map(
+                                                (segment) => segment.id,
+                                            ),
+                                        ].sort(),
+                                    ).toEqual([...unmappedSegments].sort());
+
+                                    switch (
+                                        strategies[unmappedStrategy.id!].result
+                                    ) {
+                                        case true:
+                                            // If a strategy is considered true, _all_ segments
+                                            // must be true.
+                                            expect(
+                                                mappedStrategySegments.every(
+                                                    (segment) =>
+                                                        segment.result === true,
+                                                ),
+                                            ).toBeTruthy();
+                                            break;
+                                        case false:
+                                        // empty -- all segments can be true and
+                                        // the toggle still not enabled. We
+                                        // can't check for anything here.
+                                        case 'not found':
+                                        // empty -- we can't evaluate this
+                                    }
+                                },
+                            );
+                        });
+                    },
+                )
+                .afterEach(cleanup),
+            testParams,
+        );
+    });
+
+    test("should evaluate a strategy to be unknown if it doesn't recognize the strategy and all constraints pass", async () => {
+        await fc.assert(
+            fc
+                .asyncProperty(
+                    clientFeaturesAndSegments({ minLength: 1 }).map(
+                        ({ features, ...rest }) => ({
+                            ...rest,
+                            features: features.map((feature) => ({
+                                ...feature,
+                                // remove any constraints and use a name that doesn't exist
+                                strategies: feature.strategies?.map(
+                                    (strategy) => ({
+                                        ...strategy,
+                                        name: 'bogus-strategy',
+                                        constraints: [],
+                                        segments: [],
+                                    }),
+                                ),
+                            })),
+                        }),
+                    ),
+                    generateContext(),
+                    fc.context(),
+                    async (featsAndSegments, context, ctx) => {
+                        const serviceFeatures = await insertAndEvaluateFeatures(
+                            {
+                                ...featsAndSegments,
+                                context,
+                            },
+                        );
+
+                        serviceFeatures.forEach((feature) => {
+                            feature.strategies.data.forEach((strategy) => {
+                                expect(strategy.result.evaluationStatus).toBe(
+                                    playgroundStrategyEvaluation.evaluationIncomplete,
+                                );
+                                expect(strategy.result.enabled).toBe(
+                                    playgroundStrategyEvaluation.unknownResult,
+                                );
+                            });
+                        });
+
+                        ctx.log(JSON.stringify(serviceFeatures));
+                        serviceFeatures.forEach((feature) => {
+                            // if there are strategies and they're all
+                            // incomplete and unknown, then the feature can't be
+                            // evaluated fully
+                            if (feature.strategies.data.length) {
+                                expect(feature.isEnabled).toBe(false);
+                            }
+                        });
+                    },
+                )
+                .afterEach(cleanup),
+            testParams,
+        );
+    });
+
+    test("should evaluate a strategy as false if it doesn't recognize the strategy and constraint checks fail", async () => {
+        await fc.assert(
+            fc
+                .asyncProperty(
+                    fc
+                        .tuple(
+                            fc.uuid(),
+                            clientFeaturesAndSegments({ minLength: 1 }),
+                        )
+                        .map(([uuid, { features, ...rest }]) => ({
+                            ...rest,
+                            features: features.map((feature) => ({
+                                ...feature,
+                                // use a constraint that will never be true
+                                strategies: feature.strategies?.map(
+                                    (strategy) => ({
+                                        ...strategy,
+                                        name: 'bogusStrategy',
+                                        constraints: [
+                                            {
+                                                contextName: 'appName',
+                                                operator: 'IN' as const,
+                                                values: [uuid],
+                                            },
+                                        ],
+                                    }),
+                                ),
+                            })),
+                        })),
+                    generateContext(),
+                    fc.context(),
+                    async (featsAndSegments, context, ctx) => {
+                        const serviceFeatures = await insertAndEvaluateFeatures(
+                            {
+                                ...featsAndSegments,
+                                context,
+                            },
+                        );
+
+                        serviceFeatures.forEach((feature) => {
+                            feature.strategies.data.forEach((strategy) => {
+                                expect(strategy.result.evaluationStatus).toBe(
+                                    playgroundStrategyEvaluation.evaluationIncomplete,
+                                );
+                                expect(strategy.result.enabled).toBe(false);
+                            });
+                        });
+
+                        ctx.log(JSON.stringify(serviceFeatures));
+
+                        serviceFeatures.forEach((feature) => {
+                            if (feature.strategies.data.length) {
+                                // if there are strategies and they're all
+                                // incomplete and false, then the feature
+                                // is also false
+                                expect(feature.isEnabled).toEqual(false);
+                            }
+                        });
+                    },
+                )
+                .afterEach(cleanup),
+            testParams,
+        );
+    });
+
+    test('should evaluate a feature as unknown if there is at least one incomplete strategy among all failed strategies', async () => {
+        await fc.assert(
+            fc
+                .asyncProperty(
+                    fc
+                        .tuple(
+                            fc.uuid(),
+                            clientFeaturesAndSegments({ minLength: 1 }),
+                        )
+                        .map(([uuid, { features, ...rest }]) => ({
+                            ...rest,
+                            features: features.map((feature) => ({
+                                ...feature,
+                                // use a constraint that will never be true
+                                strategies: [
+                                    ...feature.strategies!.map((strategy) => ({
+                                        ...strategy,
+                                        constraints: [
+                                            {
+                                                contextName: 'appName',
+                                                operator: 'IN' as const,
+                                                values: [uuid],
+                                            },
+                                        ],
+                                    })),
+                                    { name: 'my-custom-strategy' },
+                                ],
+                            })),
+                        })),
+                    generateContext(),
+                    async (featsAndSegments, context) => {
+                        const serviceFeatures = await insertAndEvaluateFeatures(
+                            {
+                                ...featsAndSegments,
+                                context,
+                            },
+                        );
+
+                        serviceFeatures.forEach((feature) => {
+                            if (feature.strategies.data.length) {
+                                // if there are strategies and they're
+                                // all incomplete and unknown, then
+                                // the feature is also unknown and
+                                // thus 'false' (from an SDK point of
+                                // view)
+                                expect(feature.isEnabled).toEqual(false);
+                            }
+                        });
+                    },
+                )
+                .afterEach(cleanup),
+            testParams,
+        );
+    });
+
+    test("features can't be evaluated to true if they're not enabled in the current environment", async () => {
+        await fc.assert(
+            fc
+                .asyncProperty(
+                    clientFeaturesAndSegments({ minLength: 1 }).map(
+                        ({ features, ...rest }) => ({
+                            ...rest,
+                            features: features.map((feature) => ({
+                                ...feature,
+                                enabled: false,
+                                // remove any constraints and use a name that doesn't exist
+                                strategies: [{ name: 'default' }],
+                            })),
+                        }),
+                    ),
+                    generateContext(),
+                    fc.context(),
+                    async (featsAndSegments, context, ctx) => {
+                        const serviceFeatures = await insertAndEvaluateFeatures(
+                            {
+                                ...featsAndSegments,
+                                context,
+                            },
+                        );
+
+                        serviceFeatures.forEach((feature) => {
+                            feature.strategies.data.forEach((strategy) => {
+                                expect(strategy.result.evaluationStatus).toBe(
+                                    playgroundStrategyEvaluation.evaluationComplete,
+                                );
+                                expect(strategy.result.enabled).toBe(true);
+                            });
+                        });
+
+                        ctx.log(JSON.stringify(serviceFeatures));
+                        serviceFeatures.forEach((feature) => {
+                            expect(feature.isEnabled).toBe(false);
+                            expect(feature.isEnabledInCurrentEnvironment).toBe(
+                                false,
+                            );
+                        });
+                    },
+                )
+                .afterEach(cleanup),
+            testParams,
+        );
+    });
+
+    test('output toggles should have the same variants as input toggles', async () => {
+        await fc.assert(
+            fc
+                .asyncProperty(
+                    clientFeaturesAndSegments({ minLength: 1 }),
+                    generateContext(),
+                    async ({ features, segments }, context) => {
+                        const serviceFeatures = await insertAndEvaluateFeatures(
+                            {
+                                features,
+                                segments,
+                                context,
+                            },
+                        );
+
+                        const variantsMap = features.reduce(
+                            (acc, feature) => ({
+                                ...acc,
+                                [feature.name]: feature.variants,
+                            }),
+                            {},
+                        );
+
+                        serviceFeatures.forEach((feature) => {
+                            if (variantsMap[feature.name]) {
+                                expect(feature.variants).toEqual(
+                                    expect.arrayContaining(
+                                        variantsMap[feature.name],
+                                    ),
+                                );
+                                expect(variantsMap[feature.name]).toEqual(
+                                    expect.arrayContaining(feature.variants),
+                                );
+                            } else {
+                                expect(feature.variants).toStrictEqual([]);
+                            }
+                        });
+                    },
+                )
+                .afterEach(cleanup),
+            testParams,
+        );
+    });
+
+    test('isEnabled matches strategies.results', async () => {
+        await fc.assert(
+            fc
+                .asyncProperty(
+                    clientFeaturesAndSegments({ minLength: 1 }),
+                    generateContext(),
+                    async ({ features, segments }, context) => {
+                        const serviceFeatures = await insertAndEvaluateFeatures(
+                            {
+                                features,
+                                segments,
+                                context,
+                            },
+                        );
+
+                        serviceFeatures.forEach((feature) => {
+                            if (feature.isEnabled) {
+                                expect(
+                                    feature.isEnabledInCurrentEnvironment,
+                                ).toBe(true);
+                                expect(feature.strategies.result).toBe(true);
+                            } else {
+                                expect(
+                                    !feature.isEnabledInCurrentEnvironment ||
+                                        feature.strategies.result !== true,
+                                ).toBe(true);
+                            }
+                        });
+                    },
+                )
+                .afterEach(cleanup),
+            testParams,
+        );
+    });
+
+    test('strategies.results matches the individual strategy results', async () => {
+        await fc.assert(
+            fc
+                .asyncProperty(
+                    clientFeaturesAndSegments({ minLength: 1 }),
+                    generateContext(),
+                    async ({ features, segments }, context) => {
+                        const serviceFeatures = await insertAndEvaluateFeatures(
+                            {
+                                features,
+                                segments,
+                                context,
+                            },
+                        );
+
+                        serviceFeatures.forEach(({ strategies }) => {
+                            if (strategies.result === false) {
+                                expect(
+                                    strategies.data.every(
+                                        (strategy) =>
+                                            strategy.result.enabled === false,
+                                    ),
+                                ).toBe(true);
+                            } else if (
+                                strategies.result ===
+                                playgroundStrategyEvaluation.unknownResult
+                            ) {
+                                expect(
+                                    strategies.data.some(
+                                        (strategy) =>
+                                            strategy.result.enabled ===
+                                            playgroundStrategyEvaluation.unknownResult,
+                                    ),
+                                ).toBe(true);
+
+                                expect(
+                                    strategies.data.every(
+                                        (strategy) =>
+                                            strategy.result.enabled !== true,
+                                    ),
+                                ).toBe(true);
+                            } else {
+                                if (strategies.data.length > 0) {
+                                    expect(
+                                        strategies.data.some(
+                                            (strategy) =>
+                                                strategy.result.enabled ===
+                                                true,
+                                        ),
+                                    ).toBe(true);
+                                }
+                            }
+                        });
+                    },
+                )
+                .afterEach(cleanup),
+            testParams,
+        );
+    });
+
+    test('unevaluated features should not have variants', async () => {
+        await fc.assert(
+            fc
+                .asyncProperty(
+                    clientFeaturesAndSegments({ minLength: 1 }),
+                    generateContext(),
+                    async ({ features, segments }, context) => {
+                        const serviceFeatures = await insertAndEvaluateFeatures(
+                            {
+                                features,
+                                segments,
+                                context,
+                            },
+                        );
+
+                        serviceFeatures.forEach((feature) => {
+                            if (
+                                feature.strategies.result ===
+                                playgroundStrategyEvaluation.unknownResult
+                            ) {
+                                expect(feature.variant).toEqual({
+                                    name: 'disabled',
+                                    enabled: false,
+                                    feature_enabled: false,
+                                });
+                            }
+                        });
+                    },
+                )
+                .afterEach(cleanup),
+            testParams,
+        );
+    });
+});

@@ -1,0 +1,158 @@
+import type { EventEmitter } from 'events';
+import { DB_TIME } from '../metric-events.js';
+import metricsHelper from '../util/metrics-helper.js';
+import type { LogProvider, Logger } from '../logger.js';
+import NotFoundError from '../error/notfound-error.js';
+import type { ITag } from '../tags/index.js';
+import type { ITagStore } from '../types/stores/tag-store.js';
+import type { Db } from './db.js';
+
+const COLUMNS = ['type', 'value'];
+const TABLE = 'tags';
+
+interface ITagTable {
+    type: string;
+    value: string;
+}
+
+export default class TagStore implements ITagStore {
+    private db: Db;
+
+    private logger: Logger;
+
+    private readonly timer: Function;
+
+    constructor(db: Db, eventBus: EventEmitter, getLogger: LogProvider) {
+        this.db = db;
+        this.logger = getLogger('tag-store.ts');
+        this.timer = (action) =>
+            metricsHelper.wrapTimer(eventBus, DB_TIME, {
+                store: 'tag',
+                action,
+            });
+    }
+
+    async getTagsByType(type: string): Promise<ITag[]> {
+        const stopTimer = this.timer('getTagByType');
+        const rows = await this.db.select(COLUMNS).from(TABLE).where({ type });
+        stopTimer();
+        return rows.map(this.rowToTag);
+    }
+
+    async getAll(): Promise<ITag[]> {
+        const stopTimer = this.timer('getAll');
+        const rows = await this.db.select(COLUMNS).from(TABLE);
+        stopTimer();
+        return rows.map(this.rowToTag);
+    }
+
+    async getTag(type: string, value: string): Promise<ITag> {
+        const stopTimer = this.timer('getTag');
+        const tag = await this.db
+            .first(COLUMNS)
+            .from(TABLE)
+            .where({ type, value });
+        stopTimer();
+        if (!tag) {
+            throw new NotFoundError(
+                `No tag with type: [${type}] and value [${value}]`,
+            );
+        }
+        return tag;
+    }
+
+    async exists(tag: ITag): Promise<boolean> {
+        const stopTimer = this.timer('exists');
+        const result = await this.db.raw(
+            `SELECT EXISTS (SELECT 1 FROM ${TABLE} WHERE type = ? AND value = ?) AS present`,
+            [tag.type, tag.value],
+        );
+        const { present } = result.rows[0];
+        stopTimer();
+        return present;
+    }
+
+    async createTag(tag: ITag): Promise<void> {
+        const stopTimer = this.timer('createTag');
+        await this.db(TABLE).insert(tag);
+        stopTimer();
+    }
+
+    async renameTag(tag: ITag, newValue: string): Promise<void> {
+        const stopTimer = this.timer('renameTag');
+        // feature_tag's foreign key to tags has no ON UPDATE CASCADE, so the tag
+        // can't be updated in place. Create the new value, move the flags to it,
+        // then delete the old value, which no flag references any more.
+        // created_at is copied so the rename doesn't look like a new tag.
+        // If the new value already exists, the old one is merged into it and
+        // the existing row, with its created_at, is kept.
+        await this.db(TABLE)
+            .insert(
+                this.db(TABLE)
+                    .select('type', this.db.raw('?', [newValue]), 'created_at')
+                    .where({ type: tag.type, value: tag.value }),
+            )
+            .onConflict(['type', 'value'])
+            .ignore();
+        // feature_tag's primary key allows a tag only once per flag, so drop the old
+        // value where the flag already has the new one instead of moving it.
+        await this.db('feature_tag')
+            .where({ tag_type: tag.type, tag_value: tag.value })
+            .whereIn(
+                'feature_name',
+                this.db('feature_tag')
+                    .select('feature_name')
+                    .where({ tag_type: tag.type, tag_value: newValue }),
+            )
+            .del();
+        await this.db('feature_tag')
+            .where({ tag_type: tag.type, tag_value: tag.value })
+            .update({ tag_value: newValue });
+        await this.db(TABLE).where({ type: tag.type, value: tag.value }).del();
+        stopTimer();
+    }
+
+    async delete(tag: ITag): Promise<void> {
+        const stopTimer = this.timer('deleteTag');
+        await this.db(TABLE).where(tag).del();
+        stopTimer();
+    }
+
+    async deleteAll(): Promise<void> {
+        const stopTimer = this.timer('deleteAll');
+        await this.db(TABLE).del();
+        stopTimer();
+    }
+
+    async bulkImport(tags: ITag[]): Promise<ITag[]> {
+        return this.db(TABLE)
+            .insert(tags)
+            .returning(COLUMNS)
+            .onConflict(['type', 'value'])
+            .ignore();
+    }
+
+    destroy(): void {}
+
+    async get({ type, value }: ITag): Promise<ITag> {
+        const stopTimer = this.timer('getTag');
+        const tag = await this.db
+            .first(COLUMNS)
+            .from(TABLE)
+            .where({ type, value });
+        stopTimer();
+        if (!tag) {
+            throw new NotFoundError(
+                `No tag with type: [${type}] and value [${value}]`,
+            );
+        }
+        return tag;
+    }
+
+    rowToTag(row: ITagTable): ITag {
+        return {
+            type: row.type,
+            value: row.value,
+        };
+    }
+}

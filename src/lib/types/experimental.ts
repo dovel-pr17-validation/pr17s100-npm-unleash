@@ -1,0 +1,449 @@
+import { PayloadType, type Variant } from 'unleash-client';
+import { defaultVariant } from 'unleash-client/lib/variant.js';
+import {
+    parseEnvVarBoolean,
+    parseEnvVarBooleanOrStringVariant,
+} from '../util/index.js';
+import type { MetricFlagContext } from 'unleash-client/lib/impact-metrics/metric-types.js';
+import type { Context } from 'unleash-client';
+
+// biome-ignore lint/suspicious/noEmptyInterface: extension point for packages that embed unleash-server.
+export interface IFlagKeyOverrides {}
+
+export type IFlagKey =
+    | 'accessLogs'
+    | 'anonymiseEventLog'
+    | 'encryptEmails'
+    | 'enableLicense'
+    | 'responseTimeWithAppNameKillSwitch'
+    | 'maintenanceMode'
+    | 'messageBanner'
+    | 'strictSchemaValidation'
+    | 'personalAccessTokensKillSwitch'
+    | 'sessionTimeouts'
+    | 'migrationLock'
+    | 'demo'
+    | 'interactiveDemoKillSwitch'
+    | 'advancedPlayground'
+    | 'filterInvalidClientMetrics'
+    | 'disableMetrics'
+    | 'celebrateUnleash'
+    | 'feedbackPosting'
+    | 'extendedUsageMetrics'
+    | 'feedbackComments'
+    | 'usePromiseTokenCache'
+    | 'disableUpdateMaxRevisionId'
+    | 'disablePublishUnannouncedEvents'
+    | 'outdatedSdksBanner'
+    | 'responseTimeMetricsFix'
+    | 'disableShowContextFieldSelectionValues'
+    | 'manyStrategiesPagination'
+    | 'enableLegacyVariants'
+    | 'extendedMetrics'
+    | 'removeUnsafeInlineStyleSrc'
+    | 'projectRoleAssignment'
+    | 'webhookDomainLogging'
+    | 'productivityReportEmail'
+    | 'productivityReportUnsubscribers'
+    | 'tokenExpiryNotifications'
+    | 'showUserDeviceCount'
+    | 'memorizeStats'
+    | 'deltaApi'
+    | 'cacheFeatureSerialization'
+    | 'uniqueSdkTracking'
+    | 'consumptionModel'
+    | 'impactViews'
+    | 'disableImpactMetrics'
+    | 'etagByEnv'
+    | 'optimizeLifecycle'
+    | 'flightRecorderSdk'
+    | 'flightRecorderAdminEvents'
+    | 'flightRecorderFrontend'
+    | 'regexConstraintOperator'
+    | 'userTokenWithClientApiLoggingKillSwitch'
+    | 'multiMetricChart'
+    | 'logRocketEnabled'
+    | 'hubspotChatEnabled'
+    | 'allowDeprecatedApiTokenMiddleware'
+    | 'serviceNowIntegration'
+    | 'learningLab'
+    | 'onboardingIntroTour'
+    | 'onboardingIntroTourAdvancedTopics'
+    | 'secureAccountTokenStorage'
+    | 'recordSdkFlavorMetrics'
+    | 'searchDocsWidget'
+    | 'semverBuildMetadata'
+    | 'auditEventUserAgent'
+    | 'helpMenuRelocationHint'
+    | 'ipConstraintOperator'
+    | 'githubIntegration'
+    | 'integrationParamKvpEditor'
+    | 'perFlagLifetime'
+    | 'payloadSchemas'
+    | 'singlePageStrategyForm'
+    | 'feedbackModule'
+    | 'feedbackModuleDisplaySurvey'
+    | 'feedbackModuleSubmitResponses'
+    | 'playgroundFeatureEvaluation'
+    | 'slackAppAuthV2'
+    | 'redactFeatureLabelInMetrics'
+    | keyof IFlagKeyOverrides;
+
+export type IFlags = Partial<{ [key in IFlagKey]: boolean | Variant }>;
+
+const flags: IFlags = {
+    anonymiseEventLog: false,
+    enableLicense: false,
+    sessionTimeouts: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_SESSION_TIMEOUTS,
+        false,
+    ),
+    responseTimeWithAppNameKillSwitch: parseEnvVarBoolean(
+        process.env.UNLEASH_RESPONSE_TIME_WITH_APP_NAME_KILL_SWITCH,
+        false,
+    ),
+    maintenanceMode: parseEnvVarBooleanOrStringVariant(
+        process.env.UNLEASH_EXPERIMENTAL_MAINTENANCE_MODE,
+        false,
+    ),
+    messageBanner: {
+        name: 'message-banner',
+        enabled: parseEnvVarBoolean(
+            process.env.UNLEASH_EXPERIMENTAL_MESSAGE_BANNER,
+            false,
+        ),
+        payload: {
+            type: PayloadType.JSON,
+            value:
+                process.env.UNLEASH_EXPERIMENTAL_MESSAGE_BANNER_PAYLOAD ?? '',
+        },
+    },
+    strictSchemaValidation: parseEnvVarBoolean(
+        process.env.UNLEASH_STRICT_SCHEMA_VALIDTION,
+        false,
+    ),
+    personalAccessTokensKillSwitch: parseEnvVarBoolean(
+        process.env.UNLEASH_PAT_KILL_SWITCH,
+        false,
+    ),
+    migrationLock: parseEnvVarBoolean(process.env.MIGRATION_LOCK, true),
+    demo: parseEnvVarBoolean(process.env.UNLEASH_DEMO, false),
+    onboardingIntroTourAdvancedTopics: parseEnvVarBoolean(
+        process.env.UNLEASH_ONBOARDING_INTRO_TOUR_ADVANCED_TOPICS,
+        false,
+    ),
+    interactiveDemoKillSwitch: parseEnvVarBoolean(
+        process.env.UNLEASH_INTERACTIVE_DEMO_KILL_SWITCH,
+        false,
+    ),
+    filterInvalidClientMetrics: parseEnvVarBoolean(
+        process.env.FILTER_INVALID_CLIENT_METRICS,
+        false,
+    ),
+    disableMetrics: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_DISABLE_METRICS,
+        false,
+    ),
+    celebrateUnleash: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_CELEBRATE_UNLEASH,
+        false,
+    ),
+    feedbackPosting: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_FEEDBACK_POSTING,
+        false,
+    ),
+    encryptEmails: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_ENCRYPT_EMAILS,
+        false,
+    ),
+    extendedUsageMetrics: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_EXTENDED_USAGE_METRICS,
+        false,
+    ),
+    outdatedSdksBanner: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_OUTDATED_SDKS_BANNER,
+        false,
+    ),
+    feedbackComments: {
+        name: 'feedbackComments',
+        enabled: parseEnvVarBoolean(
+            process.env.UNLEASH_EXPERIMENTAL_FEEDBACK_COMMENTS,
+            false,
+        ),
+        payload: {
+            type: PayloadType.JSON,
+            value:
+                process.env.UNLEASH_EXPERIMENTAL_FEEDBACK_COMMENTS_PAYLOAD ??
+                '',
+        },
+    },
+    usePromiseTokenCache: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_USE_PROMISE_TOKEN_CACHE,
+        false,
+    ),
+    disableUpdateMaxRevisionId: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_DISABLE_SCHEDULED_CACHES,
+        false,
+    ),
+    disablePublishUnannouncedEvents: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_DISABLE_SCHEDULED_CACHES,
+        false,
+    ),
+    responseTimeMetricsFix: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_RESPONSE_TIME_METRICS_FIX,
+        false,
+    ),
+    disableShowContextFieldSelectionValues: parseEnvVarBoolean(
+        process.env
+            .UNLEASH_EXPERIMENTAL_DISABLE_SHOW_CONTEXT_FIELD_SELECTION_VALUES,
+        false,
+    ),
+    manyStrategiesPagination: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_MANY_STRATEGIES_PAGINATION,
+        false,
+    ),
+    enableLegacyVariants: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_ENABLE_LEGACY_VARIANTS,
+        false,
+    ),
+    extendedMetrics: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_EXTENDED_METRICS,
+        false,
+    ),
+    removeUnsafeInlineStyleSrc: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_REMOVE_UNSAFE_INLINE_STYLE_SRC,
+        false,
+    ),
+    projectRoleAssignment: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_PROJECT_ROLE_ASSIGNMENT,
+        false,
+    ),
+    webhookDomainLogging: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENT_WEBHOOK_DOMAIN_LOGGING,
+        false,
+    ),
+    productivityReportEmail: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_PRODUCTIVITY_REPORT_EMAIL,
+        false,
+    ),
+    productivityReportUnsubscribers: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_PRODUCTIVITY_REPORT_UNSUBSCRIBERS,
+        false,
+    ),
+    tokenExpiryNotifications: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_TOKEN_EXPIRY_NOTIFICATIONS,
+        false,
+    ),
+    showUserDeviceCount: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_SHOW_USER_DEVICE_COUNT,
+        false,
+    ),
+    deltaApi: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_DELTA_API,
+        false,
+    ),
+    cacheFeatureSerialization: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_CACHE_FEATURE_SERIALIZATION,
+        false,
+    ),
+    uniqueSdkTracking: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_UNIQUE_SDK_TRACKING,
+        false,
+    ),
+    consumptionModel: parseEnvVarBoolean(
+        process.env.EXPERIMENTAL_CONSUMPTION_MODEL,
+        false,
+    ),
+    impactViews: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_IMPACT_VIEWS,
+        false,
+    ),
+    disableImpactMetrics: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_DISABLE_IMPACT_METRICS,
+        false,
+    ),
+    flightRecorderSdk: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_FLIGHT_RECORDER_SDK,
+        false,
+    ),
+    flightRecorderAdminEvents: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_FLIGHT_RECORDER_ADMIN_EVENTS,
+        false,
+    ),
+    flightRecorderFrontend: {
+        name: 'flightRecorderFrontend',
+        enabled: parseEnvVarBoolean(
+            process.env.UNLEASH_EXPERIMENTAL_FLIGHT_RECORDER_FRONTEND,
+            false,
+        ),
+        payload: {
+            type: PayloadType.STRING,
+            value:
+                process.env.UNLEASH_EXPERIMENTAL_FLIGHT_RECORDER_FRONTEND_URL ??
+                '',
+        },
+    },
+    regexConstraintOperator: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_REGEX_CONSTRAINT_OPERATOR,
+        false,
+    ),
+    ipConstraintOperator: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_IP_CONSTRAINT_OPERATOR,
+        false,
+    ),
+    userTokenWithClientApiLoggingKillSwitch: parseEnvVarBoolean(
+        process.env
+            .UNLEASH_EXPERIMENTAL_USERTOKEN_WITH_CLIENTAPI_LOGGING_KILL_SWITCH,
+        false,
+    ),
+    multiMetricChart: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_MULTI_METRIC_CHART,
+        false,
+    ),
+    logRocketEnabled: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_LOGROCKET_ENABLED,
+        false,
+    ),
+    hubspotChatEnabled: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_HUBSPOT_CHAT_ENABLED,
+        false,
+    ),
+    learningLab: {
+        name: 'learningLab',
+        enabled: parseEnvVarBoolean(
+            process.env.UNLEASH_EXPERIMENTAL_LEARNING_LAB,
+            false,
+        ),
+        payload: {
+            type: PayloadType.JSON,
+            value: process.env.UNLEASH_EXPERIMENTAL_LEARNING_LAB_PAYLOAD ?? '',
+        },
+    },
+    serviceNowIntegration: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_SERVICE_NOW_INTEGRATION,
+        false,
+    ),
+    recordSdkFlavorMetrics: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_RECORD_SDK_FLAVOR_METRICS,
+        false,
+    ),
+    secureAccountTokenStorage: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_SECURE_ACCOUNT_TOKEN,
+        false,
+    ),
+    searchDocsWidget: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_SEARCH_DOCS_WIDGET,
+        false,
+    ),
+    semverBuildMetadata: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_SEMVER_BUILD_METADATA,
+        false,
+    ),
+    auditEventUserAgent: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_AUDIT_EVENT_USER_AGENT,
+        false,
+    ),
+    helpMenuRelocationHint: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_HELP_MENU_RELOCATION_HINT,
+        false,
+    ),
+    githubIntegration: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_GITHUB_INTEGRATION,
+        false,
+    ),
+    slackAppAuthV2: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_SLACK_APP_AUTH_V2,
+        false,
+    ),
+    redactFeatureLabelInMetrics: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_REDACT_FEATURE_LABEL_IN_METRICS,
+        false,
+    ),
+    integrationParamKvpEditor: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_INTEGRATION_PARAM_KVP_EDITOR,
+        false,
+    ),
+    perFlagLifetime: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_PER_FLAG_LIFETIME,
+        false,
+    ),
+    payloadSchemas: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_PAYLOAD_SCHEMAS,
+        false,
+    ),
+    singlePageStrategyForm: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_SINGLE_PAGE_STRATEGY_FORM,
+        false,
+    ),
+    feedbackModule: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_FEEDBACK_MODULE,
+        false,
+    ),
+    feedbackModuleDisplaySurvey: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_FEEDBACK_MODULE_DISPLAY_SURVEY,
+        false,
+    ),
+    feedbackModuleSubmitResponses: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_FEEDBACK_MODULE_SUBMIT_RESPONSES,
+        false,
+    ),
+    playgroundFeatureEvaluation: parseEnvVarBoolean(
+        process.env.UNLEASH_EXPERIMENTAL_PLAYGROUND_FEATURE_EVALUATION,
+        false,
+    ),
+};
+
+export const defaultExperimentalOptions: IExperimentalOptions = {
+    flags,
+    externalResolver: {
+        ready: Promise.resolve(),
+        isEnabled: (): boolean => false,
+        getVariant: () => defaultVariant,
+        getStaticContext: () => ({}),
+    },
+};
+
+export interface IExperimentalOptions {
+    flags: IFlags;
+    externalResolver: IExternalFlagResolver;
+}
+
+export interface IFlagContext extends Context {}
+
+export interface IFlagResolver {
+    ready: Promise<void>;
+    getAll: (context?: IFlagContext) => IFlags;
+    isEnabled: (expName: IFlagKey, context?: IFlagContext) => boolean;
+    getVariant: (expName: IFlagKey, context?: IFlagContext) => Variant;
+    getStaticContext: () => IFlagContext;
+    impactMetrics?: IImpactMetricsResolver;
+}
+
+export interface IExternalFlagResolver {
+    ready?: Promise<void>;
+    isEnabled: (flagName: IFlagKey, context?: IFlagContext) => boolean;
+    getVariant: (flagName: IFlagKey, context?: IFlagContext) => Variant;
+    getStaticContext: () => IFlagContext;
+    impactMetrics?: IImpactMetricsResolver;
+}
+
+export interface IImpactMetricsResolver {
+    defineCounter(name: string, help: string);
+    defineGauge(name: string, help: string);
+    defineHistogram(name: string, help: string, buckets?: number[]);
+    incrementCounter(
+        name: string,
+        value?: number,
+        metricsFlagContext?: MetricFlagContext,
+    ): void;
+    updateGauge(
+        name: string,
+        value: number,
+        metricsFlagContext?: MetricFlagContext,
+    ): void;
+    observeHistogram(
+        name: string,
+        value: number,
+        metricsFlagContext?: MetricFlagContext,
+    ): void;
+}

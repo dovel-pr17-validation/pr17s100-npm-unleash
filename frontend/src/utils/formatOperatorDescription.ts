@@ -1,0 +1,82 @@
+import type { Operator } from 'constants/operators';
+
+export const formatOperatorDescription = (
+    operator: Operator,
+    inverted?: boolean,
+): string => {
+    if (inverted) {
+        return invertedConstraintOperatorDescriptions[operator];
+    }
+    return constraintOperatorDescriptions[operator];
+};
+
+const constraintOperatorDescriptions: Record<Operator, string> = {
+    IN: 'is one of',
+    NOT_IN: 'is not one of',
+    STR_CONTAINS: 'is a string that contains',
+    STR_STARTS_WITH: 'is a string that starts with',
+    STR_ENDS_WITH: 'is a string that ends with',
+    NUM_EQ: 'is a number equal to',
+    NUM_GT: 'is a number greater than',
+    NUM_GTE: 'is a number greater than or equal to',
+    NUM_LT: 'is a number less than',
+    NUM_LTE: 'is a number less than or equal to',
+    DATE_BEFORE: 'is a date before',
+    DATE_AFTER: 'is a date after',
+    SEMVER_EQ: 'is a SemVer equal to',
+    SEMVER_GT: 'is a SemVer greater than',
+    SEMVER_LT: 'is a SemVer less than',
+    SEMVER_GTE: 'is a SemVer greater than or equal to',
+    SEMVER_LTE: 'is a SemVer less than or equal to',
+    REGEX: 'matches regex',
+    IN_CIDR: 'is an IP in',
+};
+
+const invertedConstraintOperatorDescriptions: Record<Operator, string> = {
+    IN: 'is not one of',
+    NOT_IN: 'is one of',
+    STR_CONTAINS: 'is a string that does not contain',
+    STR_STARTS_WITH: 'is a string that does not start with',
+    STR_ENDS_WITH: 'is a string that does not end with',
+    NUM_EQ: 'is a number not equal to',
+    NUM_GT: 'is a number not greater than',
+    NUM_GTE: 'is a number less than',
+    NUM_LT: 'is a number not less than',
+    NUM_LTE: 'is a number greater than',
+    DATE_BEFORE: 'is a date not before',
+    DATE_AFTER: 'is a date not after',
+    SEMVER_EQ: 'is a SemVer not equal to',
+    SEMVER_GT: 'is a SemVer not greater than',
+    SEMVER_LT: 'is a SemVer not less than',
+    SEMVER_GTE: 'is a SemVer less than',
+    SEMVER_LTE: 'is a SemVer greater than',
+    REGEX: 'does not match regex',
+    IN_CIDR: 'is an IP not in',
+};
+
+export const operatorExplanations: Record<Operator, string> = {
+    IN: 'Exact match on any value you list.',
+    NOT_IN: 'No match on any value you list.',
+    STR_CONTAINS: 'The value appears anywhere in the field.',
+    STR_STARTS_WITH: 'ada@ matches ada@gmail.com.',
+    STR_ENDS_WITH:
+        '@gmail.com matches ada@gmail.com – handy for whole domains.',
+
+    NUM_EQ: 'Exactly this number.',
+    NUM_GT: 'Above this number.',
+    NUM_GTE: 'Above or equal to this number.',
+    NUM_LT: 'Below this number.',
+    NUM_LTE: 'Below or equal to this number.',
+
+    DATE_BEFORE: 'Before this date.',
+    DATE_AFTER: 'After this date.',
+
+    SEMVER_EQ: 'Exactly this version.',
+    SEMVER_GT: 'Releases newer than this version.',
+    SEMVER_LT: 'Releases older than this version.',
+    SEMVER_GTE: 'This version and newer releases.',
+    SEMVER_LTE: 'This version and older releases.',
+
+    REGEX: 'Matches values against a regular expression',
+    IN_CIDR: 'Matches IP addresses within this CIDR range',
+};

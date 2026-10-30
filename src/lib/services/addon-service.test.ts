@@ -1,0 +1,1250 @@
+import getLogger from '../../test/fixtures/no-logger.js';
+import TagTypeService from '../features/tag-type/tag-type-service.js';
+import { FakeTagUsageReadModel } from '../features/tag-usage/fake-tag-usage-read-model.js';
+import { createFakePrivateProjectChecker } from '../features/private-project/createPrivateProjectChecker.js';
+import {
+    ADDON_CONFIG_CREATED,
+    ADDON_CONFIG_DELETED,
+    ADDON_CONFIG_UPDATED,
+    FEATURE_CREATED,
+    type IEvent,
+} from '../events/index.js';
+import Addon from '../addons/addon.js';
+import type { IAddonConfig } from '../types/model.js';
+import createStores from '../../test/fixtures/store.js';
+
+import AddonService from './addon-service.js';
+import type { IAddonDto } from '../types/stores/addon-store.js';
+import SimpleAddon from './addon-service-test-simple-addon.js';
+import type { IAddonProviders } from '../addons/index.js';
+import {
+    type IFlagKey,
+    type IFlagResolver,
+    type IUnleashConfig,
+    SYSTEM_USER,
+    TEST_AUDIT_USER,
+} from '../types/index.js';
+import { createFakeEventsService } from '../internals.js';
+import { createTestConfig } from '../../test/config/test-config.js';
+import NotFoundError from '../error/notfound-error.js';
+import { IntegrationEventsService } from './index.js';
+import joi from 'joi';
+const { ValidationError } = joi;
+
+const MASKED_VALUE = '*****';
+
+let addonProvider: IAddonProviders;
+
+const config: IUnleashConfig = createTestConfig();
+
+function getSetup(flagResolver = {} as IFlagResolver) {
+    const stores = createStores();
+    const eventService = createFakeEventsService(config);
+    const tagTypeService = new TagTypeService(
+        stores,
+        { getLogger },
+        eventService,
+        new FakeTagUsageReadModel(),
+        createFakePrivateProjectChecker(),
+    );
+    const integrationEventsService = new IntegrationEventsService(stores, {
+        getLogger,
+        flagResolver: {} as IFlagResolver,
+    });
+
+    addonProvider = {
+        simple: new SimpleAddon({
+            getLogger,
+            unleashUrl: 'http://test',
+            integrationEventsService,
+            flagResolver: {} as IFlagResolver,
+            eventBus: config.eventBus,
+            allowPrivateUrls: true,
+        }),
+    };
+    return {
+        addonService: new AddonService(
+            stores,
+            {
+                getLogger,
+                // @ts-expect-error
+                server: { unleashUrl: 'http://test' },
+                allowPrivateUrlInIntegration: true,
+                flagResolver,
+            },
+            tagTypeService,
+            eventService,
+            integrationEventsService,
+            addonProvider,
+        ),
+        eventService,
+        stores,
+        tagTypeService,
+        integrationEventsService,
+    };
+}
+
+const simpleAddonFor = (projects?: string[]): IAddonDto => ({
+    provider: 'simple',
+    enabled: true,
+    parameters: {
+        url: 'http://localhost/wh',
+        var: 'some-value',
+    },
+    events: [FEATURE_CREATED],
+    description: '',
+    projects,
+});
+
+test('should load addon configurations', async () => {
+    const { addonService } = getSetup();
+
+    const configs = await addonService.getAddons();
+
+    expect(configs.length).toBe(0);
+});
+
+test('should load provider definitions', async () => {
+    const { addonService } = getSetup();
+
+    const providerDefinitions = addonService.getProviderDefinitions();
+
+    const simple = providerDefinitions.find((p) => p.name === 'simple');
+
+    expect(providerDefinitions.length).toBe(1);
+    expect(simple!.name).toBe('simple');
+});
+
+test('should not allow addon-config for unknown provider', async () => {
+    const { addonService } = getSetup();
+
+    await expect(async () => {
+        await addonService.createAddon(
+            {
+                provider: 'unknown',
+                enabled: true,
+                parameters: {},
+                events: [],
+                description: '',
+            },
+            TEST_AUDIT_USER,
+        );
+    }).rejects.toThrow(ValidationError);
+});
+
+test('should trigger simple-addon eventHandler', async () => {
+    const { addonService, eventService } = getSetup();
+
+    const config = {
+        provider: 'simple',
+        enabled: true,
+        parameters: {
+            url: 'http://localhost/wh',
+            var: 'some-value',
+        },
+        events: [FEATURE_CREATED],
+        description: '',
+    };
+
+    await addonService.createAddon(config, TEST_AUDIT_USER);
+
+    // Feature flag was created
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        data: {
+            name: 'some-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+
+    const simpleProvider = addonService.addonProviders.simple as SimpleAddon;
+    const events = simpleProvider.getEvents();
+
+    expect(events.length).toBe(1);
+    expect(events[0].event.type).toBe(FEATURE_CREATED);
+    expect(events[0].event.data.name).toBe('some-toggle');
+});
+
+test('should not trigger event handler if project of event is different from addon', async () => {
+    const { addonService, eventService } = getSetup();
+    const config = {
+        provider: 'simple',
+        enabled: true,
+        events: [FEATURE_CREATED],
+        projects: ['someproject'],
+        description: '',
+        parameters: {
+            url: 'http://localhost:4242',
+        },
+    };
+
+    await addonService.createAddon(config, TEST_AUDIT_USER);
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: 'someotherproject',
+        data: {
+            name: 'some-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    const simpleProvider = addonService.addonProviders.simple as SimpleAddon;
+    const events = simpleProvider.getEvents();
+
+    expect(events.length).toBe(0);
+});
+
+test('should trigger event handler if project for event is one of the desired projects for addon', async () => {
+    const { addonService, eventService } = getSetup();
+    const desiredProject = 'desired';
+    const otherProject = 'other';
+    const config = {
+        provider: 'simple',
+        enabled: true,
+        events: [FEATURE_CREATED],
+        projects: [desiredProject],
+        description: '',
+        parameters: {
+            url: 'http://localhost:4242',
+        },
+    };
+
+    await addonService.createAddon(config, TEST_AUDIT_USER);
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: desiredProject,
+        data: {
+            name: 'some-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: otherProject,
+        data: {
+            name: 'other-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    const simpleProvider = addonService.addonProviders.simple as SimpleAddon;
+    const events = simpleProvider.getEvents();
+
+    expect(events.length).toBe(1);
+    expect(events[0].event.type).toBe(FEATURE_CREATED);
+    expect(events[0].event.data.name).toBe('some-toggle');
+});
+
+test('should trigger events for multiple projects if addon is setup to filter multiple projects', async () => {
+    const { addonService, eventService } = getSetup();
+    const desiredProjects = ['desired', 'desired2'];
+    const otherProject = 'other';
+    const config = {
+        provider: 'simple',
+        enabled: true,
+        events: [FEATURE_CREATED],
+        projects: desiredProjects,
+        description: '',
+        parameters: {
+            url: 'http://localhost:4242',
+        },
+    };
+
+    await addonService.createAddon(config, TEST_AUDIT_USER);
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: desiredProjects[0],
+        data: {
+            name: 'some-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: otherProject,
+        data: {
+            name: 'other-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: desiredProjects[1],
+        data: {
+            name: 'third-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    const simpleProvider = addonService.addonProviders.simple as SimpleAddon;
+    const events = simpleProvider.getEvents();
+
+    expect(events.length).toBe(2);
+    expect(events[0].event.type).toBe(FEATURE_CREATED);
+    expect(events[0].event.data.name).toBe('some-toggle');
+    expect(events[1].event.type).toBe(FEATURE_CREATED);
+    expect(events[1].event.data.name).toBe('third-toggle');
+});
+
+test('should filter events on environment if addon is setup to filter for it', async () => {
+    const { addonService, eventService } = getSetup();
+    const desiredEnvironment = 'desired';
+    const otherEnvironment = 'other';
+    const config = {
+        provider: 'simple',
+        enabled: true,
+        events: [FEATURE_CREATED],
+        projects: [],
+        environments: [desiredEnvironment],
+        description: '',
+        parameters: {
+            url: 'http://localhost:4242',
+        },
+    };
+
+    await addonService.createAddon(config, TEST_AUDIT_USER);
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: desiredEnvironment,
+        environment: desiredEnvironment,
+        data: {
+            name: 'some-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        environment: otherEnvironment,
+        data: {
+            name: 'other-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    const simpleProvider = addonService.addonProviders.simple as SimpleAddon;
+    const events = simpleProvider.getEvents();
+
+    expect(events.length).toBe(1);
+    expect(events[0].event.type).toBe(FEATURE_CREATED);
+    expect(events[0].event.data.name).toBe('some-toggle');
+});
+
+test('should not filter out global events (no specific environment) even if addon is setup to filter for environments', async () => {
+    const { addonService, eventService } = getSetup();
+    const filteredEnvironment = 'filtered';
+    const config = {
+        provider: 'simple',
+        enabled: true,
+        events: [FEATURE_CREATED],
+        projects: [],
+        environments: [filteredEnvironment],
+        description: '',
+        parameters: {
+            url: 'http://localhost:4242',
+        },
+    };
+
+    const globalEventWithNoEnvironment = {
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: 'some-project',
+        data: {
+            name: 'some-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    };
+
+    await addonService.createAddon(config, TEST_AUDIT_USER);
+    await eventService.storeEvent(globalEventWithNoEnvironment);
+    const simpleProvider = addonService.addonProviders.simple as SimpleAddon;
+    const events = simpleProvider.getEvents();
+
+    expect(events.length).toBe(1);
+    expect(events[0].event.type).toBe(FEATURE_CREATED);
+    expect(events[0].event.data.name).toBe('some-toggle');
+});
+
+test('should not filter out global events (no specific project) even if addon is setup to filter for projects', async () => {
+    const { addonService, eventService } = getSetup();
+    const filteredProject = 'filtered';
+    const config = {
+        provider: 'simple',
+        enabled: true,
+        events: [FEATURE_CREATED],
+        projects: [filteredProject],
+        environments: [],
+        description: '',
+        parameters: {
+            url: 'http://localhost:4242',
+        },
+    };
+
+    const globalEventWithNoProject = {
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        data: {
+            name: 'some-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    };
+
+    await addonService.createAddon(config, TEST_AUDIT_USER);
+    await eventService.storeEvent(globalEventWithNoProject);
+    const simpleProvider = addonService.addonProviders.simple as SimpleAddon;
+    const events = simpleProvider.getEvents();
+
+    expect(events.length).toBe(1);
+    expect(events[0].event.type).toBe(FEATURE_CREATED);
+    expect(events[0].event.data.name).toBe('some-toggle');
+});
+
+test('should support wildcard option for filtering addons', async () => {
+    const { addonService, eventService } = getSetup();
+    const desiredProjects = ['desired', 'desired2'];
+    const otherProject = 'other';
+    const config = {
+        provider: 'simple',
+        enabled: true,
+        events: [FEATURE_CREATED],
+        projects: ['*'],
+        description: '',
+        parameters: {
+            url: 'http://localhost:4242',
+        },
+    };
+
+    await addonService.createAddon(config, TEST_AUDIT_USER);
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: desiredProjects[0],
+        data: {
+            name: 'some-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: otherProject,
+        data: {
+            name: 'other-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: desiredProjects[1],
+        data: {
+            name: 'third-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    const simpleProvider = addonService.addonProviders.simple as SimpleAddon;
+    const events = simpleProvider.getEvents();
+
+    expect(events).toHaveLength(3);
+    expect(events[0].event.type).toBe(FEATURE_CREATED);
+    expect(events[0].event.data.name).toBe('some-toggle');
+    expect(events[1].event.type).toBe(FEATURE_CREATED);
+    expect(events[1].event.data.name).toBe('other-toggle');
+    expect(events[2].event.type).toBe(FEATURE_CREATED);
+    expect(events[2].event.data.name).toBe('third-toggle');
+});
+
+test('Should support filtering by both project and environment', async () => {
+    const { addonService, eventService } = getSetup();
+    const desiredProjects = ['desired1', 'desired2', 'desired3'];
+    const desiredEnvironments = ['env1', 'env2', 'env3'];
+    const config = {
+        provider: 'simple',
+        enabled: true,
+        events: [FEATURE_CREATED],
+        projects: desiredProjects,
+        environments: desiredEnvironments,
+        description: '',
+        parameters: {
+            url: 'http://localhost:4242',
+        },
+    };
+    const expectedFeatureNames = [
+        'desired-toggle1',
+        'desired-toggle2',
+        'desired-toggle3',
+    ];
+    await addonService.createAddon(config, TEST_AUDIT_USER);
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: desiredProjects[0],
+        environment: desiredEnvironments[0],
+        data: {
+            name: expectedFeatureNames[0],
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: desiredProjects[0],
+        environment: 'wrongenvironment',
+        data: {
+            name: 'other-toggle',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: desiredProjects[2],
+        environment: desiredEnvironments[1],
+        data: {
+            name: expectedFeatureNames[1],
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: desiredProjects[2],
+        environment: desiredEnvironments[2],
+        data: {
+            name: expectedFeatureNames[2],
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+    await eventService.storeEvent({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        project: 'wrongproject',
+        environment: desiredEnvironments[0],
+        data: {
+            name: 'not-expected',
+            enabled: false,
+            strategies: [{ name: 'default' }],
+        },
+        ip: '127.0.0.1',
+    });
+
+    const simpleProvider = addonService.addonProviders.simple as SimpleAddon;
+    const events = simpleProvider.getEvents();
+
+    expect(events.length).toBe(3);
+    expect(events[0].event.type).toBe(FEATURE_CREATED);
+    expect(events[0].event.data.name).toBe(expectedFeatureNames[0]);
+    expect(events[1].event.type).toBe(FEATURE_CREATED);
+    expect(events[1].event.data.name).toBe(expectedFeatureNames[1]);
+    expect(events[2].event.type).toBe(FEATURE_CREATED);
+    expect(events[2].event.data.name).toBe(expectedFeatureNames[2]);
+});
+
+test('should create simple-addon config', async () => {
+    const { addonService } = getSetup();
+
+    const config: IAddonDto = {
+        provider: 'simple',
+        enabled: true,
+        parameters: {
+            url: 'http://localhost/wh',
+            var: 'some-value',
+        },
+        events: [FEATURE_CREATED],
+        description: '',
+    };
+
+    await addonService.createAddon(config, TEST_AUDIT_USER);
+    const addons = await addonService.getAddons();
+
+    expect(addons.length).toBe(1);
+    expect(addons[0].provider).toBe('simple');
+});
+
+test('should only return addons scoped to a single given project', async () => {
+    const { addonService } = getSetup();
+
+    const scoped = await addonService.createAddon(
+        simpleAddonFor(['my-project']),
+        TEST_AUDIT_USER,
+    );
+    await addonService.createAddon(
+        simpleAddonFor(['other-project']),
+        TEST_AUDIT_USER,
+    );
+    await addonService.createAddon(simpleAddonFor([]), TEST_AUDIT_USER);
+    await addonService.createAddon(simpleAddonFor(undefined), TEST_AUDIT_USER);
+    await addonService.createAddon(simpleAddonFor(['*']), TEST_AUDIT_USER);
+    await addonService.createAddon(
+        simpleAddonFor(['my-project', 'other-project']),
+        TEST_AUDIT_USER,
+    );
+
+    const addons = await addonService.getAddons('my-project');
+
+    expect(addons.map((addon) => addon.id)).toStrictEqual([scoped.id]);
+});
+
+test('should return every addon when no project is given', async () => {
+    const { addonService } = getSetup();
+
+    await addonService.createAddon(
+        simpleAddonFor(['my-project']),
+        TEST_AUDIT_USER,
+    );
+    await addonService.createAddon(simpleAddonFor(['*']), TEST_AUDIT_USER);
+    await addonService.createAddon(simpleAddonFor(undefined), TEST_AUDIT_USER);
+
+    const addons = await addonService.getAddons();
+
+    expect(addons.length).toBe(3);
+});
+
+test('should create tag type for simple-addon', async () => {
+    const { addonService, tagTypeService } = getSetup();
+
+    const config: IAddonDto = {
+        provider: 'simple',
+        enabled: true,
+        parameters: {
+            url: 'http://localhost/wh',
+            var: 'some-value',
+        },
+        events: [FEATURE_CREATED],
+        description: '',
+    };
+
+    await addonService.createAddon(config, TEST_AUDIT_USER);
+    const tagType = await tagTypeService.getTagType('me');
+
+    expect(tagType.name).toBe('me');
+});
+
+test('should store ADDON_CONFIG_CREATE event', async () => {
+    const { addonService, eventService } = getSetup();
+
+    const config = {
+        provider: 'simple',
+        enabled: true,
+        parameters: {
+            url: 'http://localhost/wh',
+            var: 'some-value',
+        },
+        events: [FEATURE_CREATED],
+        description: '',
+    };
+
+    await addonService.createAddon(config, TEST_AUDIT_USER);
+
+    const { events } = await eventService.getEvents();
+
+    expect(events.length).toBe(2); // Also tag-types where created
+    expect(events[1].type).toBe(ADDON_CONFIG_CREATED);
+    expect(events[1].data.provider).toBe('simple');
+});
+
+test('should store ADDON_CONFIG_UPDATE event', async () => {
+    const { addonService, eventService } = getSetup();
+
+    const config: IAddonDto = {
+        description: '',
+        provider: 'simple',
+        enabled: true,
+        parameters: {
+            url: 'http://localhost/wh',
+            var: 'some-value',
+        },
+        events: [FEATURE_CREATED],
+    };
+
+    const addonConfig = await addonService.createAddon(config, TEST_AUDIT_USER);
+
+    const updated = { ...addonConfig, description: 'test' };
+    await addonService.updateAddon(addonConfig.id, updated, TEST_AUDIT_USER);
+
+    const { events } = await eventService.getEvents();
+
+    expect(events.length).toBe(3);
+    expect(events[2].type).toBe(ADDON_CONFIG_UPDATED);
+    expect(events[2].data.provider).toBe('simple');
+});
+
+test('should store ADDON_CONFIG_REMOVE event', async () => {
+    const { addonService, eventService } = getSetup();
+
+    const config: IAddonDto = {
+        provider: 'simple',
+        description: '',
+        enabled: true,
+        parameters: {
+            url: 'http://localhost/wh',
+            var: 'some-value',
+        },
+        events: [FEATURE_CREATED],
+    };
+
+    const addonConfig = await addonService.createAddon(config, TEST_AUDIT_USER);
+
+    await addonService.removeAddon(addonConfig.id, TEST_AUDIT_USER);
+
+    const { events } = await eventService.getEvents();
+
+    expect(events.length).toBe(3);
+    expect(events[2].type).toBe(ADDON_CONFIG_DELETED);
+    expect(events[2].preData.id).toBe(addonConfig.id);
+});
+
+test('should hide sensitive fields when fetching', async () => {
+    const { addonService } = getSetup();
+
+    const config: IAddonDto = {
+        provider: 'simple',
+        enabled: true,
+        description: '',
+        parameters: {
+            url: 'http://localhost/wh',
+            var: 'some-value',
+            sensitiveParam: 'should be hidden when fetching',
+        },
+        events: [FEATURE_CREATED],
+    };
+
+    const createdConfig = await addonService.createAddon(
+        config,
+        TEST_AUDIT_USER,
+    );
+    const addons = await addonService.getAddons();
+    const addonRetrieved = await addonService.getAddon(createdConfig.id);
+
+    expect(addons.length).toBe(1);
+    expect(addons[0].parameters.sensitiveParam).toBe(MASKED_VALUE);
+    expect(addonRetrieved.parameters.sensitiveParam).toBe(MASKED_VALUE);
+});
+
+test('should not overwrite masked values when updating', async () => {
+    const { addonService, stores } = getSetup();
+
+    const config: IAddonDto = {
+        provider: 'simple',
+        enabled: true,
+        parameters: {
+            url: 'http://localhost/wh',
+            var: 'some-value',
+        },
+        events: [FEATURE_CREATED],
+        description: '',
+    };
+
+    const addonConfig = await addonService.createAddon(config, TEST_AUDIT_USER);
+
+    const updated = {
+        ...addonConfig,
+        parameters: { url: MASKED_VALUE, var: 'some-new-value' },
+        description: 'test',
+    };
+    await addonService.updateAddon(addonConfig.id, updated, TEST_AUDIT_USER);
+
+    const updatedConfig = await stores.addonStore.get(addonConfig.id);
+    expect(updatedConfig!.parameters.url).toBe('http://localhost/wh');
+    expect(updatedConfig!.parameters.var).toBe('some-new-value');
+});
+
+test('should reject addon config with missing required parameter when creating', async () => {
+    const { addonService } = getSetup();
+
+    const config = {
+        provider: 'simple',
+        enabled: true,
+        parameters: {
+            var: 'some-value',
+        },
+        events: [FEATURE_CREATED],
+        description: '',
+    };
+
+    await expect(async () =>
+        addonService.createAddon(config, TEST_AUDIT_USER),
+    ).rejects.toThrow(ValidationError);
+});
+
+test('should reject updating addon config with missing required parameter', async () => {
+    const { addonService } = getSetup();
+
+    const addonConfig = {
+        provider: 'simple',
+        enabled: true,
+        parameters: {
+            url: 'https://some.site/api',
+            var: 'some-value',
+        },
+        events: [FEATURE_CREATED],
+        description: '',
+    };
+
+    const config = await addonService.createAddon(addonConfig, TEST_AUDIT_USER);
+    const updated = {
+        ...config,
+        parameters: { var: 'some-new-value' },
+        description: 'test',
+    };
+    await expect(async () =>
+        addonService.updateAddon(config.id, updated, TEST_AUDIT_USER),
+    ).rejects.toThrow(ValidationError);
+});
+
+test('Should reject addon config if a required parameter is just the empty string', async () => {
+    const { addonService } = getSetup();
+
+    const config = {
+        provider: 'simple',
+        enabled: true,
+        parameters: {
+            url: '',
+            var: 'some-value',
+        },
+        events: [FEATURE_CREATED],
+        description: '',
+    };
+
+    await expect(async () =>
+        addonService.createAddon(config, TEST_AUDIT_USER),
+    ).rejects.toThrow(ValidationError);
+});
+
+describe('registerProvider', () => {
+    class RegisterableAddon extends Addon {
+        received: Array<{ event: IEvent; parameters: any }> = [];
+
+        constructor(cfg: IAddonConfig, name: string) {
+            super(
+                {
+                    name,
+                    displayName: name,
+                    description: 'Some addon',
+                    documentationUrl: 'https://www.example.com',
+                    parameters: [
+                        {
+                            name: 'token',
+                            displayName: 'Token',
+                            type: 'text',
+                            required: false,
+                            sensitive: true,
+                        },
+                    ],
+                    events: [FEATURE_CREATED],
+                },
+                cfg,
+            );
+        }
+
+        async handleEvent(event: IEvent, parameters: any): Promise<void> {
+            this.received.push({ event, parameters });
+        }
+    }
+
+    const buildProvider = (
+        integrationEventsService: IntegrationEventsService,
+        name: string,
+    ): RegisterableAddon =>
+        new RegisterableAddon(
+            {
+                getLogger,
+                unleashUrl: 'http://test',
+                integrationEventsService,
+                flagResolver: {} as IFlagResolver,
+                eventBus: config.eventBus,
+            },
+            name,
+        );
+
+    test('a registered provider appears in the provider list and can be used to create an addon', async () => {
+        const { addonService, integrationEventsService } = getSetup();
+
+        expect(
+            addonService
+                .getProviderDefinitions()
+                .find((p) => p.name === 'someaddon'),
+        ).toBeUndefined();
+
+        addonService.registerProvider(
+            buildProvider(integrationEventsService, 'someaddon'),
+        );
+
+        expect(
+            addonService
+                .getProviderDefinitions()
+                .find((p) => p.name === 'someaddon'),
+        ).toBeDefined();
+
+        await expect(
+            addonService.createAddon(
+                {
+                    provider: 'someaddon',
+                    enabled: true,
+                    parameters: { token: 'secret' },
+                    events: [FEATURE_CREATED],
+                    description: '',
+                },
+                TEST_AUDIT_USER,
+            ),
+        ).resolves.toMatchObject({ provider: 'someaddon' });
+    });
+
+    test('registerProvider masks the new provider sensitive params', async () => {
+        const { addonService, integrationEventsService } = getSetup();
+        addonService.registerProvider(
+            buildProvider(integrationEventsService, 'someaddon'),
+        );
+
+        const created = await addonService.createAddon(
+            {
+                provider: 'someaddon',
+                enabled: true,
+                parameters: { token: 'super-secret' },
+                events: [FEATURE_CREATED],
+                description: '',
+            },
+            TEST_AUDIT_USER,
+        );
+
+        const fetched = await addonService.getAddon(created.id);
+        expect(fetched.parameters.token).toBe(MASKED_VALUE);
+    });
+});
+
+test('should update an addon scoped to the given project', async () => {
+    const { addonService } = getSetup();
+    const addon = await addonService.createAddon(
+        simpleAddonFor(['my-project']),
+        TEST_AUDIT_USER,
+    );
+
+    const updated = await addonService.updateAddon(
+        addon.id,
+        { ...simpleAddonFor(['my-project']), description: 'updated' },
+        TEST_AUDIT_USER,
+        'my-project',
+    );
+
+    expect(updated.description).toBe('updated');
+});
+
+test('should not update an addon belonging to another project', async () => {
+    const { addonService } = getSetup();
+    const addon = await addonService.createAddon(
+        simpleAddonFor(['other-project']),
+        TEST_AUDIT_USER,
+    );
+
+    await expect(
+        addonService.updateAddon(
+            addon.id,
+            simpleAddonFor(['other-project']),
+            TEST_AUDIT_USER,
+            'my-project',
+        ),
+    ).rejects.toThrow(NotFoundError);
+});
+
+test('should not update an instance-wide addon from a project', async () => {
+    const { addonService } = getSetup();
+    const addon = await addonService.createAddon(
+        simpleAddonFor([]),
+        TEST_AUDIT_USER,
+    );
+
+    await expect(
+        addonService.updateAddon(
+            addon.id,
+            simpleAddonFor([]),
+            TEST_AUDIT_USER,
+            'my-project',
+        ),
+    ).rejects.toThrow(NotFoundError);
+});
+
+test('should not update a shared addon from one of its projects', async () => {
+    const { addonService } = getSetup();
+    const addon = await addonService.createAddon(
+        simpleAddonFor(['my-project', 'other-project']),
+        TEST_AUDIT_USER,
+    );
+
+    await expect(
+        addonService.updateAddon(
+            addon.id,
+            simpleAddonFor(['my-project', 'other-project']),
+            TEST_AUDIT_USER,
+            'my-project',
+        ),
+    ).rejects.toThrow(NotFoundError);
+});
+
+test('should not remove an addon belonging to another project', async () => {
+    const { addonService } = getSetup();
+    const addon = await addonService.createAddon(
+        simpleAddonFor(['other-project']),
+        TEST_AUDIT_USER,
+    );
+
+    await expect(
+        addonService.removeAddon(addon.id, TEST_AUDIT_USER, 'my-project'),
+    ).rejects.toThrow(NotFoundError);
+});
+
+test('should still update any addon without a project', async () => {
+    const { addonService } = getSetup();
+    const addon = await addonService.createAddon(
+        simpleAddonFor([]),
+        TEST_AUDIT_USER,
+    );
+
+    const updated = await addonService.updateAddon(
+        addon.id,
+        { ...simpleAddonFor([]), description: 'updated' },
+        TEST_AUDIT_USER,
+    );
+
+    expect(updated.description).toBe('updated');
+});
+
+test('should not let a project widen its own addon to every project', async () => {
+    const { addonService } = getSetup();
+    const addon = await addonService.createAddon(
+        simpleAddonFor(['my-project']),
+        TEST_AUDIT_USER,
+    );
+
+    const updated = await addonService.updateAddon(
+        addon.id,
+        simpleAddonFor([]),
+        TEST_AUDIT_USER,
+        'my-project',
+    );
+
+    expect(updated.projects).toStrictEqual(['my-project']);
+});
+
+test('should not let a project move its addon to another project', async () => {
+    const { addonService } = getSetup();
+    const addon = await addonService.createAddon(
+        simpleAddonFor(['my-project']),
+        TEST_AUDIT_USER,
+    );
+
+    const updated = await addonService.updateAddon(
+        addon.id,
+        simpleAddonFor(['other-project']),
+        TEST_AUDIT_USER,
+        'my-project',
+    );
+
+    expect(updated.projects).toStrictEqual(['my-project']);
+});
+
+test('should scope a created addon to the project it was created from', async () => {
+    const { addonService } = getSetup();
+
+    const addon = await addonService.createAddon(
+        simpleAddonFor(['some-other-project']),
+        TEST_AUDIT_USER,
+        'my-project',
+    );
+
+    expect(addon.projects).toStrictEqual(['my-project']);
+});
+
+describe('with a provider behind a feature flag', () => {
+    class FlaggedAddon extends Addon {
+        readonly flag: IFlagKey = 'serviceNowIntegration';
+
+        received: IEvent[] = [];
+
+        constructor(cfg: IAddonConfig) {
+            super(
+                {
+                    name: 'flagged',
+                    displayName: 'Flagged',
+                    description: 'An addon behind a feature flag',
+                    documentationUrl: 'https://www.example.com',
+                    parameters: [],
+                    events: [FEATURE_CREATED],
+                },
+                cfg,
+            );
+        }
+
+        async handleEvent(event: IEvent): Promise<void> {
+            this.received.push(event);
+        }
+    }
+
+    const setupWithFlaggedProvider = (initiallyEnabled: boolean) => {
+        let flagEnabled = initiallyEnabled;
+        const setup = getSetup({
+            isEnabled: () => flagEnabled,
+        } as unknown as IFlagResolver);
+        const flagged = new FlaggedAddon({
+            getLogger,
+            unleashUrl: 'http://test',
+            integrationEventsService: setup.integrationEventsService,
+            flagResolver: {} as IFlagResolver,
+            eventBus: config.eventBus,
+        });
+        setup.addonService.registerProvider(flagged);
+        return {
+            ...setup,
+            flagged,
+            setFlagEnabled: (enabled: boolean) => {
+                flagEnabled = enabled;
+            },
+        };
+    };
+
+    const flaggedIntegration = (): IAddonDto => ({
+        provider: 'flagged',
+        enabled: true,
+        parameters: {},
+        events: [FEATURE_CREATED],
+        description: '',
+    });
+
+    const featureCreated = () => ({
+        type: FEATURE_CREATED,
+        createdBy: SYSTEM_USER.username!,
+        createdByUserId: SYSTEM_USER.id,
+        data: { name: 'some-toggle' },
+        ip: '127.0.0.1',
+    });
+
+    test('should hide the provider and its integrations while the flag is off', async () => {
+        const { addonService, stores } = setupWithFlaggedProvider(false);
+        await stores.addonStore.insert(flaggedIntegration());
+
+        const { providers, addons } = await addonService.getAddonsOverview();
+
+        expect(providers.map(({ name }) => name)).toStrictEqual(['simple']);
+        expect(addons).toStrictEqual([]);
+    });
+
+    test('should reject creating an integration while the flag is off', async () => {
+        const { addonService } = setupWithFlaggedProvider(false);
+
+        await expect(
+            addonService.createAddon(flaggedIntegration(), TEST_AUDIT_USER),
+        ).rejects.toThrow(
+            'The Flagged integration is disabled because the controlling feature flag is turned off.',
+        );
+    });
+
+    test('should not send events to its integrations while the flag is off', async () => {
+        const { stores, eventService, flagged } =
+            setupWithFlaggedProvider(false);
+        await stores.addonStore.insert(flaggedIntegration());
+
+        await eventService.storeEvent(featureCreated());
+
+        expect(flagged.received).toStrictEqual([]);
+    });
+
+    test('should list, create and send events to the provider while the flag is on', async () => {
+        const { addonService, eventService, flagged } =
+            setupWithFlaggedProvider(true);
+
+        await addonService.createAddon(flaggedIntegration(), TEST_AUDIT_USER);
+        await eventService.storeEvent(featureCreated());
+        const { providers, addons } = await addonService.getAddonsOverview();
+
+        expect(providers.map(({ name }) => name)).toStrictEqual([
+            'simple',
+            'flagged',
+        ]);
+        expect(addons.map(({ provider }) => provider)).toStrictEqual([
+            'flagged',
+        ]);
+        expect(flagged.received).toHaveLength(1);
+    });
+
+    test('should start sending events when the flag is turned on at runtime', async () => {
+        const { stores, eventService, flagged, setFlagEnabled } =
+            setupWithFlaggedProvider(false);
+        await stores.addonStore.insert(flaggedIntegration());
+
+        await eventService.storeEvent(featureCreated());
+        setFlagEnabled(true);
+        await eventService.storeEvent(featureCreated());
+
+        expect(flagged.received).toHaveLength(1);
+    });
+
+    test('should stop sending events when the flag is turned off at runtime', async () => {
+        const { addonService, eventService, flagged, setFlagEnabled } =
+            setupWithFlaggedProvider(true);
+        await addonService.createAddon(flaggedIntegration(), TEST_AUDIT_USER);
+
+        await eventService.storeEvent(featureCreated());
+        setFlagEnabled(false);
+        await eventService.storeEvent(featureCreated());
+
+        expect(flagged.received).toHaveLength(1);
+    });
+});
